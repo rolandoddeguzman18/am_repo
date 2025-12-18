@@ -1,144 +1,125 @@
-# fetch_servicenow_resolved_tickets
-
 ```python
-import requests
 import typing
-import json
 import core
 
-
-def fetch_servicenow_resolved_tickets(
-    instance_url: typing.Annotated[str, "ServiceNow instance URL"], 
-    secret_name: typing.Annotated[str, "Core secret name for credentials"]
-) -> str:
+def fetch_servicenow_resolved_tickets(instance_name: typing.Annotated[str, "ServiceNow instance name (e.g. 'dev12345')"]) -> dict:
     """
-    Fetch the last 10 resolved ServiceNow incidents.
-    
-    This function retrieves resolved incidents (state=6) from ServiceNow using the Table API.
-    It fetches credentials from the core secret management system and returns structured
-    ticket data including number, short description, state, and resolution details.
+    Fetch the 10 most recent resolved tickets from ServiceNow incident table.
     
     Args:
-        instance_url: The ServiceNow instance URL (e.g., 'https://company.service-now.com')
-        secret_name: Name of the secret in core containing ServiceNow credentials
+        instance_name: ServiceNow instance name (e.g. 'dev12345')
         
     Returns:
-        JSON string containing list of resolved tickets on success, or error dict on failure
-        
-    Raises:
-        ValueError: If parameters are invalid
-        requests.RequestException: If API call fails
-        Exception: For other unexpected errors
+        dict: JSON response with status, message, and data containing resolved tickets
     """
     
-    def _validate_parameters(instance_url: str, secret_name: str) -> None:
-        """Validate input parameters."""
-        if not instance_url or not isinstance(instance_url, str):
-            raise ValueError("instance_url must be a non-empty string")
-        if not secret_name or not isinstance(secret_name, str):
-            raise ValueError("secret_name must be a non-empty string")
-        if not instance_url.startswith(('http://', 'https://')):
-            raise ValueError("instance_url must start with http:// or https://")
-    
-    def _get_credentials(secret_name: str) -> typing.Dict[str, str]:
-        """Retrieve ServiceNow credentials from core."""
+    def _get_auth_credentials():
+        """Get ServiceNow authentication credentials from secret store."""
         try:
-            secret_data = core.get_secret(secret_name)
-            if not secret_data or 'username' not in secret_data or 'password' not in secret_data:
-                raise ValueError("Secret must contain 'username' and 'password' fields")
-            return secret_data
+            credentials = core.get_secret('servicenow_api')
+            if not credentials or 'username' not in credentials or 'password' not in credentials:
+                raise ValueError("Invalid ServiceNow credentials format")
+            return credentials['username'], credentials['password']
         except Exception as e:
-            raise ValueError(f"Failed to retrieve credentials: {str(e)}")
+            raise Exception(f"Failed to retrieve ServiceNow credentials: {str(e)}")
     
-    def _build_request_config(credentials: typing.Dict[str, str]) -> typing.Dict[str, typing.Any]:
-        """Build authentication and headers for API request."""
+    def _build_headers():
+        """Build HTTP headers for ServiceNow API request."""
         return {
-            'auth': (credentials['username'], credentials['password']),
-            'headers': {
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            },
-            'timeout': 30
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
         }
     
-    def _make_api_request(instance_url: str, config: typing.Dict[str, typing.Any]) -> typing.Dict[str, typing.Any]:
-        """Make the ServiceNow API request for resolved incidents."""
-        endpoint = f"{instance_url.rstrip('/')}/api/now/table/incident"
-        params = {
-            'sysparm_query': 'state=6',  # Resolved state
-            'sysparm_limit': 10,
-            'sysparm_fields': 'number,short_description,state,sys_created_on,resolved_at,resolved_by,resolution_notes,priority,category,subcategory',
-            'sysparm_order_by': '-resolved_at'
-        }
-        
-        response = requests.get(endpoint, params=params, **config)
-        response.raise_for_status()
-        return response.json()
+    def _construct_url(instance):
+        """Construct ServiceNow REST API URL for resolved incidents."""
+        base_url = f"https://{instance}.service-now.com"
+        endpoint = "/api/now/table/incident"
+        params = "?sysparm_query=state=6&sysparm_limit=10&sysparm_order_by=sys_updated_on"
+        return f"{base_url}{endpoint}{params}"
     
-    def _format_ticket_data(api_response: typing.Dict[str, typing.Any]) -> typing.List[typing.Dict[str, typing.Any]]:
-        """Format the API response into structured ticket data."""
-        tickets = []
-        for record in api_response.get('result', []):
-            ticket = {
-                'number': record.get('number', ''),
-                'short_description': record.get('short_description', ''),
-                'state': record.get('state', ''),
-                'created_on': record.get('sys_created_on', ''),
-                'resolved_at': record.get('resolved_at', ''),
-                'resolved_by': record.get('resolved_by', ''),
-                'resolution_notes': record.get('resolution_notes', ''),
-                'priority': record.get('priority', ''),
-                'category': record.get('category', ''),
-                'subcategory': record.get('subcategory', '')
-            }
-            tickets.append(ticket)
-        return tickets
+    # Parameter validation
+    if not instance_name or not isinstance(instance_name, str):
+        return {
+            "status": "error",
+            "message": "Invalid instance_name parameter: must be a non-empty string",
+            "data": None
+        }
+    
+    if not instance_name.strip():
+        return {
+            "status": "error", 
+            "message": "Instance name cannot be empty or whitespace only",
+            "data": None
+        }
     
     try:
-        # Validate input parameters
-        _validate_parameters(instance_url, secret_name)
+        import requests
         
-        # Get credentials from core
-        credentials = _get_credentials(secret_name)
+        # Get authentication credentials
+        username, password = _get_auth_credentials()
         
-        # Build request configuration
-        request_config = _build_request_config(credentials)
+        # Prepare request components
+        url = _construct_url(instance_name.strip())
+        headers = _build_headers()
+        auth = (username, password)
         
         # Make API request
-        api_response = _make_api_request(instance_url, request_config)
+        response = requests.get(url, headers=headers, auth=auth, timeout=30)
         
-        # Format and return results
-        formatted_tickets = _format_ticket_data(api_response)
+        # Check response status
+        if response.status_code == 401:
+            return {
+                "status": "error",
+                "message": "Authentication failed: Invalid ServiceNow credentials",
+                "data": None
+            }
+        elif response.status_code == 403:
+            return {
+                "status": "error", 
+                "message": "Access forbidden: Insufficient permissions for ServiceNow API",
+                "data": None
+            }
+        elif response.status_code == 404:
+            return {
+                "status": "error",
+                "message": f"ServiceNow instance '{instance_name}' not found",
+                "data": None
+            }
+        elif not response.ok:
+            return {
+                "status": "error",
+                "message": f"ServiceNow API request failed with status {response.status_code}: {response.text}",
+                "data": None
+            }
         
-        result = {
-            'success': True,
-            'tickets': formatted_tickets,
-            'total_count': len(formatted_tickets)
+        # Parse response
+        try:
+            data = response.json()
+            tickets = data.get('result', [])
+            
+            return {
+                "status": "success",
+                "message": f"Successfully retrieved {len(tickets)} resolved tickets from ServiceNow",
+                "data": tickets
+            }
+            
+        except ValueError as e:
+            return {
+                "status": "error",
+                "message": f"Failed to parse ServiceNow API response: {str(e)}",
+                "data": None
+            }
+            
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "Required module 'requests' not available",
+            "data": None
         }
-        
-        return json.dumps(result, indent=2)
-        
-    except ValueError as e:
-        error_result = {
-            'success': False,
-            'error': 'validation_error',
-            'message': str(e)
-        }
-        return error_result
-        
-    except requests.RequestException as e:
-        error_result = {
-            'success': False,
-            'error': 'api_error',
-            'message': f"ServiceNow API request failed: {str(e)}"
-        }
-        return error_result
-        
     except Exception as e:
-        error_result = {
-            'success': False,
-            'error': 'unexpected_error',
-            'message': f"Unexpected error occurred: {str(e)}"
+        return {
+            "status": "error",
+            "message": f"Unexpected error while fetching ServiceNow tickets: {str(e)}",
+            "data": None
         }
-        return error_result
 ```
